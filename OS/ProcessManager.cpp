@@ -36,6 +36,10 @@ MemoryCommand::~MemoryCommand() {}
 
 TaskInfo::TaskInfo() {}
 
+TaskInfo::TaskInfo(int pid) {
+	this->pid = pid;
+}
+
 TaskInfo::TaskInfo(string processName) {
 	ifstream ifs(processName, ios::in);
 	if (!ifs.is_open()) {
@@ -66,6 +70,7 @@ TaskInfo::TaskInfo(string processName) {
 		}
 	}
 	timeDiff = timeCPU - timeIO;
+	ifs.close();
 }
 
 TaskInfo::~TaskInfo() {}
@@ -73,6 +78,11 @@ TaskInfo::~TaskInfo() {}
 void TaskInfo::addTime() {
 	waitingTime++;
 }
+
+bool TaskInfo::operator==(const TaskInfo& taskInfo) const {
+	return (taskInfo.pid == pid);
+}
+
 MemoryRecord::MemoryRecord() {}
 
 MemoryRecord::MemoryRecord(int mark, int addr, int size) {
@@ -96,6 +106,9 @@ PCB::~PCB() {
 	for (list<BasicCommand*>::iterator it = commandList.begin(); it != commandList.end(); ++it) {
 		delete (*it);
 	}
+	for (list<MemoryRecord>::iterator it = memoryList.begin(); it != memoryList.end(); ++it) {
+		//TODO:free所有分配的内存
+	}
 }
 
 void PCB::addTime() {
@@ -103,10 +116,54 @@ void PCB::addTime() {
 }
 
 int ProcessScheduler::submit(string fileName) {
+	backBuffer.push_back(TaskInfo(fileName));//放入缓冲后备池
 	return 0;
 }
 
-void ProcessScheduler::cancel(int pid) {}
+void ProcessScheduler::cancel(int pid) {
+	list<TaskInfo>::iterator it = find(backBuffer.begin(), backBuffer.end(), TaskInfo(pid)); //查找
+	if (it != backBuffer.end()) {//找到
+		backBuffer.erase(it);
+		return;
+	}
+	for (list<PCB*>::iterator it = readyQueue.begin(); it != readyQueue.end(); ++it) {//找到
+		if ((*it)->pid == pid) {
+			processCount--;
+			delete (*it);
+			readyQueue.erase(it);
+			return;
+		}
+	}
+	for (list<PCB*>::iterator it = waitingQueue.begin(); it != waitingQueue.end(); ++it) {//找到
+		if ((*it)->pid == pid) {
+			processCount--;
+			delete (*it);
+			waitingQueue.erase(it);
+			return;
+		}
+	}
+	for (list<PCB*>::iterator it = swappedReadyQueue.begin(); it != swappedReadyQueue.end(); ++it) {//找到
+		if ((*it)->pid == pid) {
+			processCount--;
+			delete (*it);
+			swappedReadyQueue.erase(it);
+			return;
+		}
+	}
+	for (list<PCB*>::iterator it = swappedWaitingQueue.begin(); it != swappedWaitingQueue.end(); ++it) {//找到
+		if ((*it)->pid == pid) {
+			processCount--;
+			delete (*it);
+			swappedWaitingQueue.erase(it);
+			return;
+		}
+	}
+	if (runningProcess != nullptr && runningProcess->pid == pid) {
+		processCount--;
+		delete runningProcess;
+		runningProcess = nullptr;
+	}
+}
 
 list<PCB*> ProcessScheduler::processInfo() {
 	list<PCB*> result;//将所有PCB集中到result链表中并赋予正确的状态
@@ -171,8 +228,8 @@ ProcessScheduler::~ProcessScheduler() {
 	CloseHandle(hClockThread);
 }
 
-bool ProcessScheduler::longTermScheduling() {
-	if (backBuffer.size() > 0) {//仍有程序等待成为进程
+void ProcessScheduler::longTermScheduling() {
+	while (processCount < MAX_PROCESS && backBuffer.size() > 0) {//仍有程序等待成为进程
 		TaskInfo choosingTask;
 		int waitingTime = backBuffer.front().waitingTime;
 		if (waitingTime > LONG_TERM_THRESHOLD) {//超过等待时限
@@ -203,9 +260,7 @@ bool ProcessScheduler::longTermScheduling() {
 			break;
 		}
 		processCount++;
-		return true;
 	}
-	return false;
 }
 
 void ProcessScheduler::mediumTermScheduling() {
@@ -213,7 +268,16 @@ void ProcessScheduler::mediumTermScheduling() {
 }
 
 void ProcessScheduler::shortTermScheduling() {
-	//TODO: 根据RR算法，选择就绪队列中第一个进程占用CPU
+	if (runningProcess == nullptr && readyQueue.size() > 0) {//当前无执行程序且就绪队列不为空
+		runningProcess = readyQueue.front();
+		readyQueue.pop_front();
+		RR_currentExecuted = 0;
+	} else if (RR_currentExecuted == RR_TERM) {//RR时间片到期
+		readyQueue.push_back(runningProcess);
+		runningProcess = readyQueue.front();
+		readyQueue.pop_front();
+		RR_currentExecuted = 0;
+	}
 }
 
 void ProcessScheduler::requestForIO(PCB* requester) {
@@ -223,7 +287,10 @@ void ProcessScheduler::requestForIO(PCB* requester) {
 
 DWORD WINAPI clockFunc(LPVOID lpParam) {
 	ProcessScheduler* ptr = (ProcessScheduler*)lpParam;
-	//TODO: 调度
+
+	ptr->longTermScheduling();//长期调度
+	ptr->mediumTermScheduling();//中期调度
+	ptr->shortTermScheduling();//短期调度
 
 	Sleep(ProcessScheduler::CLOCK_TERM);
 	while (isClockRunning){
@@ -262,14 +329,35 @@ DWORD WINAPI clockFunc(LPVOID lpParam) {
 
 		if (ptr->runningProcess != nullptr) {//有需要执行的指令
 			PCB* pcbPtr = ptr->runningProcess;
-			switch ((*pcbPtr->PC)->command) {//具体指令的执行
-				//TODO: 执行指令
-			default:
-				break;
+			pcbPtr->runningTime++;//执行完一个时间片
+			if (pcbPtr->runningTime == (*pcbPtr->PC)->time) {//指令所需时间等待完毕
+				switch ((*pcbPtr->PC)->command) {//具体指令的执行
+					//TODO: 执行指令
+				case 'Q'://退出程序
+					ptr->processCount--;//当前进程数减一
+					delete ptr->runningProcess;//销毁当前进程
+					ptr->runningProcess = nullptr;
+					ptr->RR_currentExecuted = 0;
+				default:
+					break;
+				}
+				if (ptr->runningProcess != nullptr) {//程序未退出
+					pcbPtr->PC++;//指向下一条指令
+					pcbPtr->runningTime = 0;
+					switch ((*pcbPtr->PC)->command) {
+					case 'P'://IO操作
+						ptr->requestForIO(pcbPtr);//移入IO队列
+						ptr->runningProcess = nullptr;//running置空
+					default:
+						break;
+					}
+				}
 			}
 		}
 		
-		//TODO: 判断是否需要进行调度
+		ptr->longTermScheduling();//长期调度
+		ptr->mediumTermScheduling();//中期调度
+		ptr->shortTermScheduling();//短期调度
 
 		Sleep(ProcessScheduler::CLOCK_TERM);
 	}

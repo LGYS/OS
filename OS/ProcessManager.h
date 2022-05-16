@@ -5,7 +5,7 @@ using namespace std;
 #include<string>
 #include<Windows.h>
 
-static bool isClockRunning = true;
+static bool isClockRunning = true;//操作系统退出前置false，用于关闭时钟线程
 
 class BasicCommand
 {
@@ -51,9 +51,12 @@ public:
 	list<BasicCommand*> commandList;//指令序列
 	int timeDiff;//CPU占用时间与IO占用时间之差
 	TaskInfo();
+	TaskInfo(int pid);
 	TaskInfo(string processName);
 	~TaskInfo();
 	void addTime();
+
+	bool operator==(const TaskInfo& taskInfo) const;
 private:
 	static int pidCount;//记录当前可分配的pid值
 };
@@ -126,8 +129,9 @@ private:
 	HANDLE hClockThread;//时钟线程句柄
 	int runningTime;//当前进程已占用CPU时间，用于短期调度
 	int processCount;//当前进程数，用于长期调度
+	int RR_currentExecuted;//RR已经执行的时间片数
 
-	bool longTermScheduling();//长期调度，当一个进程执行完毕后调用，或者道数不足时调用，返回值为真时有新的进程调度入内存
+	void longTermScheduling();//长期调度，当一个进程执行完毕后调用，或者道数不足时调用，返回值为真时有新的进程调度入内存
 	void mediumTermScheduling();//中期调度，申请内存不足时调用，或内存释放时调用
 	void shortTermScheduling();//短期调度，进程需切换时调用
 
